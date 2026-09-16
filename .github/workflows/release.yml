@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 2.0.16-emnify.1 (tag v<version> is created)"
+        required: true
+        type: string
+
+permissions:
+  contents: write # create the release and upload the .hpi asset
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for the git-changelist maven extension
+
+      - name: Resolve version and tag
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            TAG="v${VERSION}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION} tag=${TAG}"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      # Tests run in the standard plugin CI; the release job only packages.
+      # Flip -DskipTests off here if you want the release gated on tests.
+      - name: Build HPI
+        run: >
+          mvn -B -ntp -DskipTests
+          -Drevision=${{ steps.v.outputs.version }} -Dchangelist=
+          clean package
+
+      - name: Stage versioned asset
+        id: asset
+        run: |
+          set -euo pipefail
+          SRC=$(ls target/*.hpi)
+          DEST="target/atlassian-jira-software-cloud-${{ steps.v.outputs.version }}.hpi"
+          cp "$SRC" "$DEST"
+          echo "path=${DEST}" >> "$GITHUB_OUTPUT"
+          ls -la "$DEST"
+
+      - name: Create GitHub Release with HPI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.v.outputs.tag }}"
+          # Create the tag on this commit if it does not already exist (manual runs).
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes \
+            "${{ steps.asset.outputs.path }}"
